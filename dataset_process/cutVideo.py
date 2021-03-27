@@ -1,39 +1,15 @@
 # 播放视频根据输入剪切后另存为到标签对应路径
 # 可将完整视频切成单个动作一个视频，并放到对应标签文件夹
-# 20_59_57 22:13 finished
-# WIN_20210323_21_02_34_Pro.mp4 22:48 finished
-# WIN_20210323_21_16_59_Pro.mp4 23:57 finished
-# WIN_20210323_21_19_42_Pro.mp4 0:50 finished
-# WIN_20210323_21_21_45_Pro.mp4 17:21 finished
-# WIN_20210323_21_23_26_Pro.mp4 19:51 finished
-# WIN_20210323_21_29_37_Pro.mp4 20:07 finished
-# WIN_20210323_21_32_09_Pro.mp4 20:27 finished
-# WIN_20210323_21_34_09_Pro.mp4 20:48 finished
-# computer over
-# VID_20210323_203608.mp4 21:00 finished
-# VID_20210323_204043.mp4 22:19 finished
-# VID_20210323_204321.mp4 21:49 finished
-# VID_20210323_204410.mp4 21:56 finished
-# VID_20210323_204719.mp4 22:08 finished
-# VID_20210323_204850.mp4 22:14 finished
-# VID_20210323_204954.mp4 22:26 finished
-# VID_20210323_205056.mp4 22:38 finished
-# VID_20210323_205706.mp4 22:44 finished
-# VID_20210323_205936.mp4 23:00 finished
-# VID_20210323_210156.mp4 23:07 finished
-# VID_20210323_210341.mp4 23:18 finished
-# VID_20210323_211923.mp4 23:23 finished
-# VID_20210323_212124.mp4 23:46 finished
-# VID_20210323_213320.mp4 16:15 processing
 # 空格继续，s + 标签名 开始某段视频，e + 标签名 结束某段视频，并将其保存到to_path的标签名文件夹里，开始和结束的标签名必须对应
 import os
 import time
+
 import cv2
 
 # 键盘按键：标签
-sign_map = {"1": "ClickDown", "2": "ClickUp", "3": "Translation", "4": "ZoomOut",
-            "5": "ZoomIn", "6": "Catch",
-            "7": "Clockwise", "8": "Anticlockwise"}
+sign_map = {"1": "Click Down", "2": "Click Up", "3": "Swipe",
+            "4": "Zooming Out With Two Hands", "5": "Zooming In With Two Hands", "6": "Catch",
+            "7": "Turn With Two Hands Clockwise", "8": "Turn With Two Hands Counterclockwise"}
 
 time_format = "%Y-%m-%d-%H-%M-%S"
 
@@ -103,7 +79,6 @@ def cut_video(fourcc, show_interval, to_path, video_path, video_type):
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     i = 0
-    video_index = 1
     sign_state = (" ", " ")
     video_writer = None
     while True:
@@ -137,7 +112,6 @@ def cut_video(fourcc, show_interval, to_path, video_path, video_type):
                                                 fourcc, fps, (width, height))
                             video_writer.write(frame)
                             sign_state = ("s", key2)
-                            video_index += 1
                             print("start sign {}".format(sign_map[key2]))
                         continue
                     # 结束某标签剪切
@@ -159,6 +133,7 @@ def cut_video(fourcc, show_interval, to_path, video_path, video_type):
             else:
                 if video_writer is not None:
                     video_writer.write(frame)
+            print("\r> {}%".format(i / frame_num * 100), end="")
         else:
             print('end video {}'.format(video_path))
             break
