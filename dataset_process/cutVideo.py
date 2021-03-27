@@ -1,5 +1,8 @@
 # 播放视频根据输入剪切后另存为到标签对应路径
 # 可将完整视频切成单个动作一个视频，并放到对应标签文件夹
+# 20_59_57 22:13 finished
+# WIN_20210323_21_02_34_Pro.mp4 22:48 finished
+# WIN_20210323_21_16_59_Pro.mp4 23:57 processing
 # 空格继续，s + 标签名 开始某段视频，e + 标签名 结束某段视频，并将其保存到to_path的标签名文件夹里，开始和结束的标签名必须对应
 import os
 import time
@@ -7,9 +10,8 @@ import time
 import cv2
 
 # 键盘按键：标签
-sign_map = {"1": "Click Down", "2": "Click Up", "3": "Swipe",
-            "4": "Zooming Out With Two Hands", "5": "Zooming In With Two Hands", "6": "Catch",
-            "7": "Turn With Two Hands Clockwise", "8": "Turn With Two Hands Counterclockwise"}
+sign_map = {"1": "ClickDown", "2": "ClickUp", "3": "Translation", "4": "ZoomOut",
+            "5": "ZoomIn", "6": "Catch", "7": "Clockwise", "8": "Anticlockwise"}
 
 time_format = "%Y-%m-%d-%H-%M-%S"
 
@@ -19,12 +21,12 @@ use_finish_cache = False
 
 def main():
     # 保存路径
-    to_path = "E:/2"
-    # 视频路径(自动判断是单个视频文件还是一个文件夹)
-    video_path = "E:/1"
+    to_path = "D:/document/服务外包大赛/视频手势/dealWithVideo"
+    # 单个视频路径
+    video_path = "D:/document/服务外包大赛/视频手势/电脑/WIN_20210323_21_16_59_Pro.mp4"
 
     # 显示频率，空格跳过的时间/s，可自由设置
-    show_interval = 0.1
+    show_interval = 0.15
     fourcc = cv2.VideoWriter_fourcc('D', 'I', 'V', 'X')  # mp4编节码器
     video_type = ".mp4"
 
