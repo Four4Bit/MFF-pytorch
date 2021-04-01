@@ -32,7 +32,7 @@ def main():
     args.store_name = '_'.join(['MFF', args.dataset, args.modality, args.arch,
                                 'segment%d' % args.num_segments, '%df1c' % args.num_motion])
     print('storing name: ' + args.store_name)
-
+# 导入模型操作
     model = TSN(num_class, args.num_segments, args.modality,
                 base_model=args.arch,
                 consensus_type=args.consensus_type,

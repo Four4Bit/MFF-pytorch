@@ -7,7 +7,13 @@ from torch.nn.init import normal, constant
 import pretrainedmodels
 import MLPmodule
 
+# tsn参数、rgb和flow的融合、new_conv = nn.conv2d函数、三个处理函数、下载model的修改和添加
+# 类似代码及解释https://blog.csdn.net/u014380165/article/details/79058147
 
+# TSN(temporal segment network)
+# self;不同数据集的子类数;一个video分成多少份;输入模式:RGB，optical flow,RGB flow;采用那种模型:resnet101,BNInception;
+# new_length与输入数据类型相关;不同输入snippet的融合方式:avg; ; ;dropout参数;img_feature_dim特征维度;
+# TSN调用_prepare_base_model(self, base_model)和_prepare_tsn(self, num_class)完成初始化
 class TSN(nn.Module):
     def __init__(self, num_class, num_segments, modality,
                  base_model='resnet101', new_length=None,
@@ -27,7 +33,7 @@ class TSN(nn.Module):
         self.img_feature_dim = img_feature_dim  # the dimension of the CNN feature to represent each frame
         if not before_softmax and consensus_type != 'avg':
             raise ValueError("Only avg consensus can be used after Softmax")
-
+        # 对于非RGB类型我们要获取连续六个片段
         if new_length is None:
             if modality == "RGB":
                 self.new_length = 1
@@ -51,9 +57,11 @@ class TSN(nn.Module):
             """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout,
                        self.img_feature_dim)))
 
+        # 准备模型
         self._prepare_base_model(base_model)
 
         feature_dim = self._prepare_tsn(num_class)
+
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -79,12 +87,15 @@ class TSN(nn.Module):
         if partial_bn:
             self.partialBN(True)
 
+    # 修改最后一层全连接层，并返回最后一层的输入特征图的channel数（RGB为3，单色图为1，每个卷积层中卷积核的数量），resnet和BNInception的last_layer_name为fc，
+    # mobilenetv2的为classifier，若dropout不为0则添加Dropout层和新的全连接层，否则直接修改最后一层全连接层，对全连接层的权重和偏置进行初始化
     def _prepare_tsn(self, num_class):
         feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
             self.new_fc = None
         else:
+            # 基础网络，要赋值的属性名，赋的值
             setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
             if self.consensus_type == 'MLP':
                 # set the MFFs feature dimension
@@ -102,6 +113,12 @@ class TSN(nn.Module):
             constant(self.new_fc.bias, 0)
         return feature_dim
 
+    # _prepare_base_model方法来导入模型，根据is_shift和non_local参数添加相应模块，base_model非resnet时无non_local，
+    # 根据modality设置input_mean和input_std，resnet调用temporal_shift.py、non_local.py完成设置，
+    # RGB的input_mean和input_std与imagenet一致；Flow的input_mean为0.5，input_std为RGB的input_std的均值；RGBDiff相减产生，
+    # input_mean和input_std长度共num_length+1，头为RGB的值，input_mean的尾为0，input_std的尾为input_std的均值乘以2
+    # mobilenetv2调用temporal_shift.py完成设置，只对expand_ratio不为1并且使用残差结构的倒置残差模块设置，input_mean和input_std与resnet类似
+    # BNInception调用bn_inception.py完成模型搭建，其中build_temporal_ops()设置时序位移模块，注意到这里的input_mean非归一化，且input_std为1
     def _prepare_base_model(self, base_model):
 
         if 'resnet' in base_model or 'vgg' in base_model or 'squeezenet1_1' in base_model:
@@ -121,6 +138,7 @@ class TSN(nn.Module):
             elif self.modality == 'RGBDiff':
                 self.input_mean = [0.485, 0.456, 0.406] + [0] * 3 * self.new_length
                 self.input_std = self.input_std + [np.mean(self.input_std) * 2] * 3 * self.new_length
+        # BNInception:batch normalization inception,BN使用较大的学习率去训练网络，加速网络训练;降低过拟合现象
         elif base_model == 'BNInception':
             # 此处若无模型会从官网下载预训练模型
             self.base_model = pretrainedmodels.__dict__['bninception'](num_classes=1000, pretrained='imagenet')
@@ -168,6 +186,7 @@ class TSN(nn.Module):
     def partialBN(self, enable):
         self._enable_pbn = enable
 
+    # get_optim_policies对第一个卷积层、全连接层、bn层、普通层操作设置不同，偏置的乘子都为0表示不需要学习
     def get_optim_policies(self):
         first_conv_weight = []
         first_conv_bias = []
@@ -297,6 +316,7 @@ class TSN(nn.Module):
         setattr(container, layer_name, new_conv)
         return base_model
 
+    # 修改模型适合光流输入，修改第一个卷积层，修改输入channel，卷积核用预训练的卷积核均值赋值
     def _construct_flow_model(self, base_model):
         # modify the convolution layers
         # Torch models are usually defined in a hierarchical way.
@@ -326,10 +346,13 @@ class TSN(nn.Module):
         setattr(container, layer_name, new_conv)
         return base_model
 
+    # 修改模型适合RGBDiff输入，与上类似，注意的是有keep_rgb参数，表示是否保留RGB卷积核参数，比较好奇的是前面num_length + 1
+    # 有何用呢？
     def _construct_diff_model(self, base_model, keep_rgb=False):
         # modify the convolution layers
         # Torch models are usually defined in a hierarchical way.
         # nn.modules.children() return all sub modules in a DFS manner
+        # 上面告诉我们basemodel的返回卷积层，往往都是
         modules = list(self.base_model.modules())
         first_conv_idx = filter(lambda x: isinstance(modules[x], nn.Conv2d), list(range(len(modules))))[0]
         conv_layer = modules[first_conv_idx]
