@@ -25,12 +25,12 @@ class TSN(nn.Module):
         self.modality = modality
         self.num_segments = num_segments
         self.num_motion = num_motion
-        self.reshape = True
+        self.reshape = True  # 是否reshape
         self.before_softmax = before_softmax
         self.dropout = dropout
         self.dataset = dataset
-        self.crop_num = crop_num
-        self.consensus_type = consensus_type
+        self.crop_num = crop_num # 裁剪数量
+        self.consensus_type = consensus_type # 聚集函数G的设置，avg,max,topk,cnn,rnn
         self.img_feature_dim = img_feature_dim  # the dimension of the CNN feature to represent each frame
         if not before_softmax and consensus_type != 'avg':
             raise ValueError("Only avg consensus can be used after Softmax")
@@ -79,7 +79,7 @@ class TSN(nn.Module):
         if consensus_type == 'MLP':
             self.consensus = MLPmodule.return_MLP(consensus_type, self.img_feature_dim, self.num_segments, num_class)
         else:
-            self.consensus = ConsensusModule(consensus_type)
+            self.consensus = ConsensusModule(consensus_type) # consensusModule是聚集函数模块定义的关键
 
         if not self.before_softmax:
             self.softmax = nn.Softmax()
@@ -142,6 +142,7 @@ class TSN(nn.Module):
             self.input_size = 224
             self.input_mean = [0.485, 0.456, 0.406]
             self.input_std = [0.229, 0.224, 0.225]
+            # 调整input_size,mean,std为适合网络的值
 
             if self.modality == 'Flow':
                 self.input_mean = [0.5]
@@ -346,7 +347,7 @@ class TSN(nn.Module):
         # nn.modules.children() return all sub modules in a DFS manner
         modules = list(self.base_model.modules())
         # lambda为匿名函数，这里表示参数为x，isinstance判断modules中有多少卷积层,取第一个作为第一个卷积层的index
-        # filter() 函数用于过滤序列，过滤掉不符合条件的元素，返回由符合条件元素组成的新列表。
+        # filter() 函数用于过滤序列，过滤掉不符合条件的元素，返回由符合条件元素组成的新列表。（判断函数，可迭代对象）
         # 接收两个参数，第一个为函数，第二个为序列，序列的每个元素作为参数传递给函数进行判断，然后返回 True 或 False，最后将返回 True 的元素放到新列表中。
         first_conv_idx = list(filter(lambda x: isinstance(modules[x], nn.Conv2d), list(range(len(modules)))))[0]
         conv_layer = modules[first_conv_idx]    # 定义一个卷积层，值为原来的第一个卷积层
