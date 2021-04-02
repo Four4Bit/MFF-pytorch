@@ -354,8 +354,8 @@ class TSN(nn.Module):
         container = modules[first_conv_idx - 1] # 定义原来第一个卷积层前的一层为container
 
         # modify parameters, assume the first blob contains the convolution kernels
-        params = [x.clone() for x in conv_layer.parameters()] # 克隆卷积层参数
-        kernel_size = params[0].size()  # params[0]是weight
+        params = [x.clone() for x in conv_layer.parameters()] # 克隆卷积层参数 权重加偏置的数组
+        kernel_size = params[0].size()  # params[0]是weight 获取该层节点的数量
         print(kernel_size)
         new_kernel_size = kernel_size[:1] + (2 * self.new_length,) + kernel_size[2:] # 卷积核大小的设置，下面注释有说
         print(new_kernel_size)
