@@ -17,6 +17,7 @@
 import os
 import pdb
 
+# dataset_name = 'jester-v1'
 dataset_name = 'jester-v1'
 
 # 要求有所有标签名, 会将其排序后存到category.txt
