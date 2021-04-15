@@ -81,6 +81,8 @@ def main():
         data_length = 5
     elif args.modality == 'RGBFlow':
         data_length = args.num_motion
+    else:
+        raise Exception("args.modality is not allowed")
 
     train_loader = torch.utils.data.DataLoader(
         TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
@@ -135,6 +137,7 @@ def main():
     if args.evaluate:
         log_training = open(os.path.join(args.root_log, '%s.csv' % args.store_name), 'w')
         validate(val_loader, model, criterion, 0, log_training)
+        log_training.close()
         return
 
     log_training = open(os.path.join(args.root_log, '%s.csv' % args.store_name), 'w')
