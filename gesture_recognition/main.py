@@ -1,365 +1,297 @@
-import os
 import time
-import shutil
-import torch.nn.parallel
-import torch.backends.cudnn as cudnn
-import torch.optim
-from torch.autograd import Variable
-from torch.nn.utils import clip_grad_norm
-from torch.utils.data.sampler import SequentialSampler
-from torch.utils.tensorboard import SummaryWriter
 
-from dataset import TSNDataSet
-from models import TSN
-from transforms import *
-from opts import parser
-import datasets_video
+from communication import Sender, Receiver
+from gesture_recognition.gesture_location_system import GestureLocationSystem
+from gesture_recognition.gesture_system import GestureSystem
+from gesture_recognition.transforms import *
 
-best_prec1 = 0
-
-
-# os.environ['TORCH_HOME'] = "D:/env/others/pytorch/.cache"
 
 def main():
-    global args, best_prec1
-    args = parser.parse_args()  # 导入配置参数
-    check_rootfolders()  # 创建日志和模型文件夹
+    video_sta_shape = (176, 100)
 
-    # 标签列表，训练集txt路径，验证集txt路径，数据根路径（datasets/jester），图片文件名（{:05d}.jpg）
-    categories, args.train_list, args.val_list, args.root_path, prefix = datasets_video.return_dataset(args.dataset,
-                                                                                                       args.modality)
-    num_class = len(categories)
+    gesture_sys = GestureSystem("resnet101")
+    gesture_sys.load_model("./model/cc951_jester4_MFF_jester_RGBFlow_resnet101_segment5_3f1c_best.pth.tar")
+    # gesture_sys.load_model("./model/cc961_lessjester_MFF_jester_RGBFlow_resnet101_segment5_3f1c_best.pth.tar")
+    # gesture_sys.load_model("./model/cc973_nojester_MFF_jester_RGBFlow_resnet101_segment5_3f1c_best.pth.tar")
 
-    args.store_name = '_'.join(['MFF', args.dataset, args.modality, args.arch,
-                                'segment%d' % args.num_segments, '%df1c' % args.num_motion])
-    print('storing name: ' + args.store_name)
+    gesture_location_sys = GestureLocationSystem(video_sta_shape)
 
-    # tensorboard写入对象
-    board_writer = SummaryWriter("./log/tensorboard")
+    sender = Sender(Receiver.HOST, Receiver.PORT)
 
-    model = TSN(num_class, args.num_segments, args.modality,
-                base_model=args.arch,
-                consensus_type=args.consensus_type,
-                dropout=args.dropout, num_motion=args.num_motion,
-                img_feature_dim=args.img_feature_dim,
-                partial_bn=not args.no_partialbn,
-                dataset=args.dataset)
+    # test_file = open(r"E:\sourse\python\MFF-GestureRecognition\run_test\out\catch.txt", "w")
 
-    crop_size = model.crop_size
-    scale_size = model.scale_size
-    input_mean = model.input_mean
-    input_std = model.input_std
-    train_augmentation = model.get_augmentation()
+    all_time_sum = 0
+    n = 0
 
-    policies = model.get_optim_policies()
-    model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
+    cap = cv2.VideoCapture(0)
+    while True:
+        success, frame = cap.read()
+        frame = cv2.resize(frame, video_sta_shape)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if success:
+            s_t = time.time()
+            # （标签序号，评估值），如果数据不足，会返回None
+            result = gesture_sys.classify(frame_rgb)
+            if result is not None:
+                # print(gesture_sys.categories_map[result[0]])
+                hands_data = GestureLocationSystem.find_hands(gesture_sys.deal_video.flow_u_list[-1],
+                                                              gesture_sys.deal_video.flow_v_list[-1],
+                                                              gesture_sys.deal_video.rgb_list[-1])
+                gesture_location_sys.push_hand_data(hands_data)
 
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print(("=> loading checkpoint '{}'".format(args.resume)))
-            checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
-            best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
-            print(("=> loaded checkpoint '{}' (epoch {})"
-                   .format(args.evaluate, checkpoint['epoch'])))
+                # 定位辅助判断
+                result = filter_label_by_location(result, gesture_sys, gesture_location_sys)
+
+                hand_vector_data = gesture_location_sys.get_one_hand_move_vector()
+                hand_vector = None
+                hand_name = None
+                if hand_vector_data is not None:
+                    hand_name, hand_vector = hand_vector_data
+
+                package = {"gesture": [], "probability": [], "vector": hand_vector}
+
+                # test_speed(hand_name, hand_vector, max_v, min_v, n, sum_v)
+
+                for line in result:
+                    package["gesture"].append(gesture_sys.categories_map[line[0]])
+                    package["probability"].append(line[1].item())
+
+                sender.send(package)
+                print(package)
+
+                # test_file.write(str(package))
+                # test_file.write("\n")
+                # test_file.flush()
+
+                use_time = time.time() - s_t
+                all_time_sum += use_time
+                n += 1
+                print("all use time {}s, avg: {}".format(use_time, all_time_sum / n))
+                print()
+            cv2.imshow("show", frame)
+            cv2.waitKey(5)
         else:
-            print(("=> no checkpoint found at '{}'".format(args.resume)))
+            print("video read error")
+            return
 
-    print(model)
-    cudnn.benchmark = True
 
-    # Data loading code
-    if (args.modality != 'RGBDiff') | (args.modality != 'RGBFlow'):
-        normalize = GroupNormalize(input_mean, input_std)
-    else:
-        normalize = IdentityTransform()
+def test_speed(hand_name, hand_vector, max_v, min_v, n, sum_v):
+    speed = -1
+    if hand_vector is not None:
+        speed = cal_vector_speed(*hand_vector)
+        n += 1
+        sum_v += speed
+        if speed > max_v:
+            max_v = speed
+        if speed < min_v:
+            min_v = speed
+    if n > 0:
+        print("hand: {} -> now: {}; max: {}; min: {}; avg: {}".format(
+            hand_name, speed, max_v, min_v, sum_v / n))
 
-    if args.modality == 'RGB':
-        data_length = 1
-    elif args.modality in ['Flow', 'RGBDiff']:
-        data_length = 5
-    elif args.modality == 'RGBFlow':
-        data_length = args.num_motion
-    else:
-        raise Exception("args.modality is not allowed")
 
-    train_loader = torch.utils.data.DataLoader(
-        TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
-                   new_length=data_length,
-                   modality=args.modality,
-                   image_tmpl=prefix,
-                   dataset=args.dataset,
-                   transform=torchvision.transforms.Compose([
-                       train_augmentation,
-                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3']),
-                             isRGBFlow=(args.modality == 'RGBFlow')),
-                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
-                       normalize,
-                   ])),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=False)
+def filter_label_by_location(output, ges_sys: GestureSystem, ges_loc_sys: GestureLocationSystem):
+    """
+    训练输出定位辅助筛选
+    1. 滤去jester
+    2. 根据手的数量
 
-    val_loader = torch.utils.data.DataLoader(
-        TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
-                   new_length=data_length,
-                   modality=args.modality,
-                   image_tmpl=prefix,
-                   dataset=args.dataset,
-                   random_shift=False,
-                   transform=torchvision.transforms.Compose([
-                       GroupScale(int(scale_size)),
-                       GroupCenterCrop(crop_size),
-                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3']),
-                             isRGBFlow=(args.modality == 'RGBFlow')),
-                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
-                       normalize,
-                   ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=False)
-
-    # define loss function (criterion) and optimizer
-    if args.loss_type == 'nll':
-        criterion = torch.nn.CrossEntropyLoss().cuda()
-    else:
-        raise ValueError("Unknown loss type")
-
-    for group in policies:
-        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
-            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
-
-    optimizer = torch.optim.SGD(policies,
-                                args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-
-    # 若不训练，只是验证
-    if args.evaluate:
-        log_training = open(os.path.join(args.root_log, '%s.csv' % args.store_name), 'w')
-        validate(val_loader, model, criterion, 0, log_training)
-        log_training.close()
-        return
-
-    log_training = open(os.path.join(args.root_log, '%s.csv' % args.store_name), 'w')
-    for epoch in range(args.start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch, args.lr_steps)
-
-        # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, log_training, board_writer)
-
-        # 在训练结束后评估模型，完成后退出
-        # evaluate on validation set
-        if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            prec1 = validate(val_loader, model, criterion, (epoch + 1) * len(train_loader), log_training)
-
-            # remember best prec@1 and save checkpoint
-            is_best = prec1 > best_prec1
-            best_prec1 = max(prec1, best_prec1)
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_prec1': best_prec1,
-            }, is_best)
+    3. 双手：判断turn的方向
+    4. 双手：判断zoom是放大还是缩小
+    5. 两手：根据两手距离判断turn和zoom
+    6. 单手：移动快的swipe
+    7. 单手：手轮廓变小catch；轮廓不变swipe和click
+    """
+    # 将jester手势按顺序取出, 分成两个列表处理
+    jester_label = ["Doing other things", "Pushing Two Fingers Away", "Shaking Hand", "Thumb Up"]
+    tar_output = []
+    jester_output = []
+    for data in output:
+        if ges_sys.categories_map[data[0]] in jester_label:
+            jester_output.append(data)
         else:
-            # 每次存储检查点而不验证
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_prec1': best_prec1,
-            }, False)
-    board_writer.close()
+            tar_output.append(data)
+
+    hand_num = ges_loc_sys.get_hands_num()
+    hand_vector_data = ges_loc_sys.get_one_hand_move_vector()
+    hand_vector = None
+    if hand_vector_data is not None:
+        hand_name, hand_vector = hand_vector_data
+
+    # 根据手的数量将正确的标签排到前面
+    one_hand_label = ["Catch", "Click Down", "Click Up", "Pushing Two Fingers Away", "Shaking Hand", "Swipe",
+                      "Thumb Up"]
+    other_label = ["Doing other things"]
+    two_hands_label = ["Turn With Two Hands Clockwise", "Turn With Two Hands Counterclockwise",
+                       "Zooming In With Two Hands", "Zooming Out With Two Hands"]
+
+    tar_output = check_hand_num(ges_sys, hand_num, one_hand_label, other_label, tar_output)
+    jester_output = check_hand_num(ges_sys, hand_num, one_hand_label, other_label, jester_output)
+
+    # 判断turn的方向
+    if hand_num == 2:
+        turn_clo_id, turn_counclo_id = None, None
+        for i in range(len(tar_output)):
+            if ges_sys.categories_map[tar_output[i][0]] == "Turn With Two Hands Clockwise":
+                turn_clo_id = i
+            elif ges_sys.categories_map[tar_output[i][0]] == "Turn With Two Hands Counterclockwise":
+                turn_counclo_id = i
+            if turn_clo_id is not None and turn_counclo_id is not None:
+                break
+        if turn_clo_id is not None and turn_counclo_id is not None:
+            hands_data = ges_loc_sys.get_hands_data()
+            hand_name1, hand_name2 = list(hands_data.keys())
+            if hands_data[hand_name1][1][0] < hands_data[hand_name2][1][0]:
+                top_hand_name = hand_name1
+            else:
+                top_hand_name = hand_name2
+            if hands_data[hand_name1][1][1] < hands_data[hand_name2][1][1]:
+                left_hand_name = hand_name1
+            else:
+                left_hand_name = hand_name2
+            top_hand_vector = ges_loc_sys.get_one_hand_move_vector(hand_name=top_hand_name)
+            left_hand_vector = ges_loc_sys.get_one_hand_move_vector(hand_name=left_hand_name)
+            if top_hand_vector is not None and left_hand_vector is not None:
+                top_hand_vector, left_hand_vector = top_hand_vector[1], left_hand_vector[1]
+                if top_hand_vector[0] > 0 and left_hand_vector[1] < 0 and turn_counclo_id > turn_clo_id:
+                    tar_output[turn_clo_id], tar_output[turn_counclo_id] = tar_output[turn_counclo_id], \
+                                                                           tar_output[turn_clo_id]
+                elif top_hand_vector[0] < 0 and left_hand_vector[1] > 0 and turn_counclo_id < turn_clo_id:
+                    tar_output[turn_clo_id], tar_output[turn_counclo_id] = tar_output[turn_counclo_id], \
+                                                                           tar_output[turn_clo_id]
+
+    # 判断zoom是放大还是缩小
+    if hand_num == 2:
+        zoom_out_id, zoom_in_id = None, None
+        for i in range(len(tar_output)):
+            if ges_sys.categories_map[tar_output[i][0]] == "Zooming Out With Two Hands":
+                zoom_out_id = i
+            elif ges_sys.categories_map[tar_output[i][0]] == "Zooming In With Two Hands":
+                zoom_in_id = i
+            if zoom_out_id is not None and zoom_in_id is not None:
+                break
+        if zoom_out_id is not None and zoom_in_id is not None:
+            hands_dis_his = ges_loc_sys.get_two_hands_dis_list()
+            if len(hands_dis_his) > 1:
+                # 放大
+                if hands_dis_his[-1] > hands_dis_his[-2] and zoom_out_id > zoom_in_id:
+                    tar_output[zoom_out_id], tar_output[zoom_in_id] = tar_output[zoom_in_id], tar_output[zoom_out_id]
+                # 缩小
+                elif hands_dis_his[-1] < hands_dis_his[-2] and zoom_out_id < zoom_in_id:
+                    tar_output[zoom_out_id], tar_output[zoom_in_id] = tar_output[zoom_in_id], tar_output[zoom_out_id]
+
+    # 若是两手, 判断两手距离：若相对不变，turn向前一格；若变化较大，zoom向前一格
+    hands_dis_change_min = 27.2
+    hands_dis_change_v_min = 10.0
+    if hand_num == 2:
+        hands_dis_his = ges_loc_sys.get_two_hands_dis_list()
+        if len(hands_dis_his) > 1:
+            check_num = 5
+            hands_dis_list_tar = hands_dis_his[-min(check_num, len(hands_dis_his)):]
+            hands_dis_all = abs(max(hands_dis_list_tar) - min(hands_dis_list_tar))
+            hands_dis_now = abs(hands_dis_his[-1] - hands_dis_his[-2])
+
+            # global sum_dis_all, n, sum_dis_now
+            # sum_dis_all += hands_dis_all
+            # sum_dis_now += hands_dis_now
+            # n += 1
+            # print("hands dis all: {}; avg: {}".format(hands_dis_all, sum_dis_all / n))
+            # print("hands dis now: {}; avg: {}".format(hands_dis_now, sum_dis_now / n))
+
+            if hands_dis_all > hands_dis_change_min or hands_dis_now > hands_dis_change_v_min:
+                for i in range(1, len(tar_output)):
+                    zoom_labels = ["Zooming In With Two Hands", "Zooming Out With Two Hands"]
+                    if ges_sys.categories_map[tar_output[i][0]] in zoom_labels \
+                            and ges_sys.categories_map[tar_output[i - 1][0]] not in zoom_labels:
+                        tar_output[i - 1], tar_output[i] = tar_output[i], tar_output[i - 1]
+            else:
+                for i in range(1, len(tar_output)):
+                    turn_labels = ["Turn With Two Hands Clockwise", "Turn With Two Hands Counterclockwise"]
+                    if ges_sys.categories_map[tar_output[i][0]] in turn_labels \
+                            and ges_sys.categories_map[tar_output[i - 1][0]] not in turn_labels:
+                        tar_output[i - 1], tar_output[i] = tar_output[i], tar_output[i - 1]
+
+    # 若是单手，判断移动速度，若大于阈值，swipe向前一格
+    swipe_min_v = 8.2
+    if hand_num == 1 and hand_vector is not None:
+        swipe_speed = cal_vector_speed(*hand_vector)
+
+        # global swipe_sum, n
+        # swipe_sum += swipe_speed
+        # n += 1
+        # print("swipe speed: {}; avg: {}".format(swipe_speed, swipe_sum / n))
+
+        if swipe_speed > swipe_min_v:
+            for i in range(len(tar_output)):
+                if ges_sys.categories_map[tar_output[i][0]] == "Swipe" and i != 0:
+                    tar_output[i - 1], tar_output[i] = tar_output[i], tar_output[i - 1]
+                    break
+
+    # 若是单手，判断轮廓大小，若持续变小，catch向前一格；若持续不变，click和swipe向前一格（因为swipe出现较少，所以有两条提升条件）
+    # 效果较差，作废
+    # hands_area_influence(ges_loc_sys, ges_sys, hand_num, tar_output)
+
+    return tar_output + jester_output
 
 
-def train(train_loader, model, criterion, optimizer, epoch, log, board_writer):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
+def hands_area_influence(ges_loc_sys, ges_sys, hand_num, tar_output):
+    catch_hand_area_change_min = 5.0
+    catch_hand_area_change_v_min = 1.0
+    cl_sw_hand_area_change_max = 5.0
+    cl_sw_hand_area_change_v_max = 1.0
+    if hand_num == 1:
+        hand_area_list = ges_loc_sys.get_one_hand_area_list()
+        if len(hand_area_list) > 1:
+            # 手总变化大于阈值
+            check_num = 5
+            hand_area_list_tar = hand_area_list[-min(check_num, len(hand_area_list)):]
+            hands_area_all_diff = abs(max(hand_area_list_tar) - min(hand_area_list_tar))
+            hands_area_now_diff = abs(hand_area_list[-1] - hand_area_list[-2])
 
-    if args.no_partialbn:
-        model.module.partialBN(False)
-    else:
-        model.module.partialBN(True)
+            # global area_all_sum, area_now_sum, n
+            # n += 1
+            # area_now_sum += hands_area_now_diff
+            # area_all_sum += hands_area_all_diff
+            # print("area all sum: {}; avg: {}".format(hands_area_all_diff, area_all_sum / n))
+            # print("area now sum: {}; avg: {}".format(hands_area_now_diff, area_now_sum / n))
 
-    # switch to train mode
-    model.train()
-
-    end = time.time()
-    for i, (input_data, target) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        target = target.cuda()
-        input_var = Variable(input_data)
-        target_var = Variable(target)
-
-        # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
-
-        # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data.item(), input_data.size(0))
-        top1.update(prec1.item(), input_data.size(0))
-        top5.update(prec5.item(), input_data.size(0))
-
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-
-        loss.backward()
-
-        if args.clip_gradient is not None:
-            total_norm = clip_grad_norm(model.parameters(), args.clip_gradient)
-            # if total_norm > args.clip_gradient:
-            # print("clipping gradient: {} with coef {}".format(total_norm, args.clip_gradient / total_norm))
-
-        optimizer.step()
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        if i % args.print_freq == 0:
-            output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr']))
-            print(output)
-
-            log.write(output + '\n')
-            log.flush()
-            board_writer.add_scalar("loss", losses.val, global_step=epoch * len(train_loader) + i)
-            board_writer.add_scalar("prec@1", top1.val, global_step=epoch * len(train_loader) + i)
-            board_writer.add_scalar("prec@5", top5.val, global_step=epoch * len(train_loader) + i)
-            board_writer.add_scalar("lr", optimizer.param_groups[-1]['lr'], global_step=epoch * len(train_loader) + i)
-            board_writer.flush()
+            if hands_area_all_diff > catch_hand_area_change_min \
+                    or hands_area_now_diff > catch_hand_area_change_v_min:
+                for i in range(1, len(tar_output)):
+                    if ges_sys.categories_map[tar_output[i][0]] == "Catch":
+                        tar_output[i - 1], tar_output[i] = tar_output[i], tar_output[i - 1]
+                        break
+            elif hands_area_all_diff < cl_sw_hand_area_change_max \
+                    or hands_area_now_diff < cl_sw_hand_area_change_v_max:
+                for i in range(1, len(tar_output)):
+                    no_move_label = ["Swipe", "Click Down", "Click Up"]
+                    if ges_sys.categories_map[tar_output[i][0]] in no_move_label \
+                            and ges_sys.categories_map[tar_output[i - 1][0]] not in no_move_label:
+                        tar_output[i - 1], tar_output[i] = tar_output[i], tar_output[i - 1]
 
 
-def validate(val_loader, model, criterion, iter, log):
-    batch_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
-
-    # switch to evaluate mode
-    model.eval()
-
-    end = time.time()
-    for i, (input, target) in enumerate(val_loader):
-        target = target.cuda()
-        with torch.no_grad():
-            input_var = Variable(input)
-            target_var = Variable(target)
-
-        # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
-
-        # measure accuracy and record loss
-        # 测量精度并记录损失(最高值为正确的精确度，前5大值包含预测正确的精确度)
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-
-        losses.update(loss.data.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
-        top5.update(prec5.item(), input.size(0))
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        if i % args.print_freq == 0:
-            output = ('Test: [{0}/{1}]\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'
-                      .format(i, len(val_loader), batch_time=batch_time, loss=losses, top1=top1, top5=top5))
-            print(output)
-            log.write(output + '\n')
-            log.flush()
-
-    output = ('Testing Results: Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
-              .format(top1=top1, top5=top5, loss=losses))
-    print(output)
-    output_best = '\nBest Prec@1: %.3f' % (best_prec1)
-    print(output_best)
-    log.write(output + ' ' + output_best + '\n')
-    log.flush()
-
-    return top1.avg
+def cal_vector_speed(x, y):
+    return (x ** 2 + y ** 2) ** 0.5
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    # 存在log/..._checkpoint.pth.tar中
-    torch.save(state, '%s/%s_checkpoint.pth.tar' % (args.root_model, args.store_name))
-    if is_best:
-        shutil.copyfile('%s/%s_checkpoint.pth.tar' % (args.root_model, args.store_name),
-                        '%s/%s_best.pth.tar' % (args.root_model, args.store_name))
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-
-def adjust_learning_rate(optimizer, epoch, lr_steps):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    decay = 0.5 ** (sum(epoch >= np.array(lr_steps)))
-    lr = args.lr * decay
-    decay = args.weight_decay
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr * param_group['lr_mult']
-        param_group['weight_decay'] = decay * param_group['decay_mult']
-
-
-def accuracy(output, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-    res = []
-    for k in topk:
-        correct_k = correct[:k].contiguous().view(-1).float().sum(0)
-        res.append(correct_k.mul_(100.0 / batch_size))
-    return res
-
-
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def check_rootfolders():
-    """Create log and model folder"""
-    folders_util = [args.root_log, args.root_model, args.root_output]
-    for folder in folders_util:
-        if not os.path.exists(folder):
-            print('creating folder ' + folder)
-            os.mkdir(folder)
+def check_hand_num(ges_sys, hand_num, one_hand_label, other_label, tar_output):
+    output_tem = []
+    output_tem_1 = []
+    for data in tar_output:
+        label = ges_sys.categories_map[data[0]]
+        # 一个手或无手
+        if hand_num <= 1:
+            if label in one_hand_label or label in other_label:
+                output_tem.append(data)
+            else:
+                output_tem_1.append(data)
+        # 两个手、震荡多个手
+        else:
+            if label in one_hand_label or label in other_label:
+                output_tem_1.append(data)
+            else:
+                output_tem.append(data)
+    return output_tem + output_tem_1
 
 
 if __name__ == '__main__':
